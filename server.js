@@ -42,88 +42,198 @@ function resolveUrl(base, relative) {
   }
 }
 
+function base64Decode(str) {
+  try { return Buffer.from(str, 'base64').toString('utf-8'); } catch { return ''; }
+}
+
+async function tryDecodeHexWorker(text, pageUrl, results) {
+  const hexRegex = /_hexDec\(["']([a-f0-9]{50,})["']\)/;
+  const m = text.match(hexRegex);
+  if (!m) return;
+  try {
+    const workerUrl = hexToString(m[1]);
+    const resp = await fetchWithHeaders(workerUrl, {
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': new URL(pageUrl).origin,
+      'Referer': pageUrl,
+    });
+    if (resp.status !== 200) return;
+    const json = JSON.parse(await resp.text());
+    if (json.stream) {
+      results.sources.push({
+        type: json.stream.includes('.m3u8') ? 'hls' : 'video',
+        url: json.stream,
+        quality: 'HD',
+        referer: workerUrl,
+      });
+    }
+  } catch {}
+}
+
+async function tryCloudflareWorkerDirect(text, pageUrl, results) {
+  const cfPatterns = [
+    /(?:fetch|getStream|getUrl)\s*\(\s*["'](https?:\/\/[^'"]*workers\.dev[^'"]*)["']/,
+    /["'](https?:\/\/[a-z]+-[a-z]+-\d+[a-z]+\.[a-z0-9]+\.workers\.dev[^"']*)["']/,
+    /url\s*[:=]\s*["'](https?:\/\/[^'"]*workers\.dev[^'"]*)["']/,
+  ];
+  for (const pat of cfPatterns) {
+    const m = text.match(pat);
+    if (!m) continue;
+    try {
+      const resp = await fetchWithHeaders(m[1], {
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': new URL(pageUrl).origin,
+        'Referer': pageUrl,
+      });
+      if (resp.status !== 200) continue;
+      const body = await resp.text();
+      let json;
+      try { json = JSON.parse(body); } catch { continue; }
+      if (json.stream) {
+        results.sources.push({
+          type: json.stream.includes('.m3u8') ? 'hls' : 'video',
+          url: json.stream,
+          quality: 'HD',
+          referer: m[1],
+        });
+      }
+    } catch {}
+  }
+}
+
+function tryBase64Encoded(text, results) {
+  // Look for base64 blobs that decode to something with .m3u8
+  const b64Pat = /["']([A-Za-z0-9+/]{50,}={0,2})["']/g;
+  let match;
+  while ((match = b64Pat.exec(text)) !== null) {
+    try {
+      const decoded = base64Decode(match[1]);
+      if (decoded.includes('.m3u8')) {
+        const urls = decoded.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/g);
+        if (urls) {
+          for (const url of urls) {
+            if (!results.sources.find(s => s.url === url))
+              results.sources.push({ type: 'hls', url, quality: 'HD' });
+          }
+        }
+      }
+    } catch {}
+  }
+}
+
+function tryScriptVars(text, results) {
+  // Look for var/let/const assignments containing m3u8 URLs
+  const patterns = [
+    /(?:src|source|stream|url|link|videoSrc|hls)\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']/i,
+    /["']([^"']+\.m3u8[^"']*)["']/g,
+  ];
+  for (const pat of patterns) {
+    pat.lastIndex = 0;
+    let m;
+    while ((m = pat.exec(text)) !== null) {
+      const url = m[1];
+      if (url.includes('.m3u8') && !results.sources.find(s => s.url === url)) {
+        results.sources.push({ type: 'hls', url, quality: 'HD' });
+      }
+    }
+  }
+}
+
+function tryJsonConfigs($, results) {
+  $('script[type="application/json"], script[type="text/javascript"]').each((i, el) => {
+    const raw = $(el).html() || '';
+    // Try parsing as JSON
+    try {
+      const obj = JSON.parse(raw);
+      const walk = (o) => {
+        if (!o || typeof o !== 'object') return;
+        for (const v of Object.values(o)) {
+          if (typeof v === 'string' && v.includes('.m3u8') && !results.sources.find(s => s.url === v))
+            results.sources.push({ type: 'hls', url: v, quality: 'HD' });
+          else if (typeof v === 'object') walk(v);
+        }
+      };
+      walk(obj);
+    } catch {}
+  });
+}
+
+function tryDataAttrs($, results) {
+  $('[data-src], [data-url], [data-stream], [data-hls], [data-video], [data-source]').each((i, el) => {
+    for (const attr of ['data-src', 'data-url', 'data-stream', 'data-hls', 'data-video', 'data-source']) {
+      const val = $(el).attr(attr);
+      if (val && val.includes('.m3u8') && !results.sources.find(s => s.url === val))
+        results.sources.push({ type: 'hls', url: val, quality: 'HD' });
+    }
+  });
+}
+
+function tryMetaRefresh(text, pageUrl, results) {
+  const m = text.match(/<meta[^>]*http-equiv=["']refresh["'][^>]*content=["']\d*;?\s*url=([^"']+)["']/i);
+  if (m) {
+    const target = m[1].startsWith('http') ? m[1] : new URL(m[1], pageUrl).href;
+    results.sources.push({ type: 'redirect', url: target, quality: 'HD' });
+  }
+}
+
 async function scrapeVideoSource(pageUrl, depth = 0) {
   const results = { sources: [], error: null };
-  if (depth > 3) return results;
+  if (depth > 4) return results;
 
   try {
     const fetchResult = await fetchWithHeaders(pageUrl);
     const htmlText = await fetchResult.text();
+    const text = htmlText;
     const $ = cheerio.load(htmlText);
 
-    // Collect iframe URLs first (for later following)
+    // --- Collect followable links ---
     const iframeUrls = [];
-
-    // Pattern: iframe embeds
     $('iframe').each((i, el) => {
       const src = $(el).attr('src');
       if (!src || src.startsWith('javascript')) return;
-      const absSrc = src.startsWith('http') ? src : new URL(src, pageUrl).href;
-      iframeUrls.push(absSrc);
-      const ytMatch = src.match(/(?:youtube\.com|youtu\.be)[\/\w]*(?:\?v=|\/)([\w-]{11})/);
-      if (ytMatch) {
-        results.sources.push({ type: 'youtube', url: `https://www.youtube.com/embed/${ytMatch[1]}?autoplay=1`, quality: 'HD' });
-      } else if (src.includes('twitch.tv')) {
-        results.sources.push({ type: 'twitch', url: src, quality: 'HD' });
-      }
+      iframeUrls.push(src.startsWith('http') ? src : new URL(src, pageUrl).href);
     });
 
-    const text = htmlText;
+    // --- Phase 1: find HLS from current page ---
+    await tryDecodeHexWorker(text, pageUrl, results);
+    await tryCloudflareWorkerDirect(text, pageUrl, results);
+    tryBase64Encoded(text, results);
+    tryScriptVars(text, results);
+    tryJsonConfigs($, results);
+    tryDataAttrs($, results);
+    tryMetaRefresh(text, pageUrl, results);
 
-    // Pattern: hex-encoded worker URL (maslaz.com style)
-    const hexRegex = /_hexDec\(["']([a-f0-9]{50,})["']\)/;
-    const hexMatch = text.match(hexRegex);
-    if (hexMatch) {
+    // Direct m3u8 in raw text
+    const directM3u8 = text.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/g);
+    if (directM3u8) {
+      for (const url of directM3u8) {
+        if (!results.sources.find(s => s.url === url))
+          results.sources.push({ type: 'hls', url, quality: 'HD' });
+      }
+    }
+
+    // --- Phase 2: follow iframes (always, even if we found something) ---
+    for (const iframeUrl of iframeUrls) {
+      if (iframeUrl.includes('youtube.com') || iframeUrl.includes('youtu.be')) continue;
       try {
-        const workerUrl = hexToString(hexMatch[1]);
-        const origin = new URL(pageUrl).origin;
-        const resp = await fetchWithHeaders(workerUrl, {
-          'Accept': 'application/json, text/plain, */*',
-          'Origin': origin,
-          'Referer': pageUrl,
-        });
-        if (resp.status === 200) {
-          const json = JSON.parse(await resp.text());
-          if (json.stream) {
-            results.sources.push({
-              type: json.stream.includes('.m3u8') ? 'hls' : 'video',
-              url: json.stream,
-              quality: 'HD',
-              referer: workerUrl,
-            });
-          }
+        const sub = await scrapeVideoSource(iframeUrl, depth + 1);
+        for (const s of sub.sources) {
+          if (!results.sources.find(x => x.url === s.url))
+            results.sources.push(s);
         }
       } catch {}
     }
 
-    // Pattern: script vars with m3u8
-    $('script').each((i, el) => {
-      const script = $(el).html() || '';
-      const m = script.match(/['"](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/);
-      if (m) results.sources.push({ type: 'hls', url: m[1], quality: 'HD' });
-    });
-
-    // Pattern: direct m3u8 in page text
-    const directM3u8 = text.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/g);
-    if (directM3u8) {
-      for (const url of directM3u8) {
-        if (!results.sources.find(s => s.url === url)) {
-          results.sources.push({ type: 'hls', url, quality: 'HD' });
+    // --- Phase 3: follow meta refresh redirects ---
+    if (results.sources.some(s => s.type === 'redirect') && !results.sources.some(s => s.type === 'hls')) {
+      const redirectUrl = results.sources.find(s => s.type === 'redirect')?.url;
+      if (redirectUrl) {
+        results.sources = results.sources.filter(s => s.type !== 'redirect');
+        const sub = await scrapeVideoSource(redirectUrl, depth + 1);
+        for (const s of sub.sources) {
+          if (!results.sources.find(x => x.url === s.url))
+            results.sources.push(s);
         }
-      }
-    }
-
-    // Follow iframes to find deeper sources (only if no HLS found yet)
-    if (!results.sources.some(s => s.type === 'hls')) {
-      for (const iframeUrl of iframeUrls) {
-        try {
-          const sub = await scrapeVideoSource(iframeUrl, depth + 1);
-          for (const s of sub.sources) {
-            if (!results.sources.find(x => x.url === s.url)) {
-              results.sources.push(s);
-            }
-          }
-        } catch {}
       }
     }
 
@@ -131,9 +241,10 @@ async function scrapeVideoSource(pageUrl, depth = 0) {
     results.error = err.message;
   }
 
-  // Remove YouTube — not useful
+  // Remove YouTube
   results.sources = results.sources.filter(s => s.type !== 'youtube');
 
+  // Dedup
   const seen = new Set();
   results.sources = results.sources.filter(s => {
     const key = s.url;
@@ -142,10 +253,10 @@ async function scrapeVideoSource(pageUrl, depth = 0) {
     return true;
   });
 
-  // Sort: HLS first, then others
+  // Sort: HLS first
   results.sources.sort((a, b) => {
-    const priority = { hls: 0, mp4: 1, video: 1, twitch: 2, iframe: 3 };
-    return (priority[a.type] ?? 4) - (priority[b.type] ?? 4);
+    const priority = { hls: 0, mp4: 1, video: 1, twitch: 2, redirect: 3, iframe: 4 };
+    return (priority[a.type] ?? 5) - (priority[b.type] ?? 5);
   });
 
   return results;
