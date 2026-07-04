@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TotalSportek Streams</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0a0a0f;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+header {
+  background: linear-gradient(135deg, #1a1a2e, #16213e);
+  padding: 20px 24px;
+  border-bottom: 1px solid #2a2a4a;
+}
+header h1 { font-size: 1.5rem; color: #ff8a00; letter-spacing: 1px; }
+header p { font-size: 0.85rem; color: #888; margin-top: 4px; }
+main { max-width: 1200px; margin: 0 auto; padding: 20px 16px; }
+.loading {
+  text-align: center; padding: 60px 20px;
+  color: #888; font-size: 1.1rem;
+}
+.spinner {
+  display: inline-block; width: 36px; height: 36px;
+  border: 3px solid #333; border-top-color: #ff8a00;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+  margin-bottom: 12px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.error {
+  background: #2d1b1b; border: 1px solid #4a2222;
+  color: #ff6b6b; padding: 16px 20px; border-radius: 8px;
+  margin: 20px 0; text-align: center;
+}
+.category { margin-bottom: 28px; }
+.category h2 {
+  font-size: 1.1rem; color: #ff8a00;
+  padding: 8px 12px; border-bottom: 2px solid #2a2a4a;
+  margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+}
+.category h2 .count {
+  font-size: 0.75rem; color: #888; background: #1a1a2e;
+  padding: 2px 8px; border-radius: 10px; margin-left: auto;
+}
+.match-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+.match-card {
+  background: #141420; border: 1px solid #2a2a4a;
+  border-radius: 10px; padding: 14px 16px;
+  cursor: pointer; transition: all 0.2s;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.match-card:hover {
+  border-color: #ff8a00; background: #1a1a2e;
+  transform: translateY(-1px); box-shadow: 0 4px 20px rgba(255,138,0,0.1);
+}
+.match-card .teams { font-size: 0.95rem; font-weight: 600; color: #fff; }
+.match-card .status {
+  font-size: 0.78rem; display: inline-block;
+  padding: 2px 10px; border-radius: 12px; width: fit-content;
+}
+.status-live { background: #1a3a2a; color: #4ade80; border: 1px solid #2a5a3a; }
+.status-upcoming { background: #1a1a3a; color: #60a5fa; border: 1px solid #2a2a5a; }
+.status-ended { background: #2a1a1a; color: #f87171; border: 1px solid #4a2a2a; }
+
+.player-overlay {
+  display: none; position: fixed; inset: 0;
+  background: #000;
+  z-index: 1000;
+  flex-direction: column;
+}
+.player-overlay.open { display: flex; }
+.player-header {
+  background: #111; padding: 12px 16px;
+  display: flex; align-items: center; gap: 12px;
+  border-bottom: 1px solid #222;
+  z-index: 2;
+}
+.player-header .back-btn {
+  background: #222; border: none; color: #ccc;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  font-size: 0.85rem; font-weight: 600;
+}
+.player-header .back-btn:hover { background: #333; color: #fff; }
+.player-header .match-title { font-size: 0.95rem; font-weight: 600; color: #ff8a00; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-header .stream-info { font-size: 0.75rem; color: #666; }
+.player-container {
+  flex: 1; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  background: #000;
+}
+.player-container video, .player-container iframe {
+  width: 100%; height: 100%;
+  border: none; max-width: 100%; max-height: 100%;
+}
+.player-status {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  padding: 8px 16px; background: rgba(0,0,0,0.8);
+  font-size: 0.78rem; color: #888;
+  display: flex; align-items: center; gap: 8px;
+}
+.player-status .retry-btn {
+  background: #ff8a00; color: #000; border: none;
+  padding: 4px 12px; border-radius: 4px; cursor: pointer;
+  font-size: 0.72rem; font-weight: 700;
+}
+.player-status .retry-btn:hover { background: #ffa233; }
+.stream-selector {
+  background: #111; padding: 8px 16px;
+  display: flex; gap: 6px; overflow-x: auto;
+  border-top: 1px solid #222;
+}
+.stream-option {
+  background: #222; border: 1px solid #333;
+  color: #aaa; padding: 6px 12px; border-radius: 6px;
+  cursor: pointer; font-size: 0.75rem; white-space: nowrap;
+  transition: all 0.15s;
+}
+.stream-option:hover { border-color: #ff8a00; color: #fff; }
+.stream-option.active { background: #ff8a00; color: #000; border-color: #ff8a00; font-weight: 700; }
+.stream-option.failed { opacity: 0.5; text-decoration: line-through; }
+
+@media (max-width: 768px) {
+  .match-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TOTALSPORTEK &#x2022; Stream Player</h1>
+  <p>Click any match to auto-play the first working stream</p>
+</header>
+
+<main id="app">
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <div>Loading matches...</div>
+  </div>
+  <div id="content" style="display:none"></div>
+</main>
+
+<div class="player-overlay" id="playerOverlay">
+  <div class="player-header">
+    <button class="back-btn" onclick="closePlayer()">&larr; Back</button>
+    <span class="match-title" id="playerTitle">Match</span>
+    <span class="stream-info" id="playerStreamInfo"></span>
+  </div>
+  <div class="player-container" id="playerContainer">
+    <video id="videoPlayer" controls autoplay playsinline style="display:none"></video>
+    <iframe id="iframePlayer" allow="autoplay; encrypted-media; fullscreen" style="display:none"></iframe>
+    <div class="loading" id="playerLoading">
+      <div class="spinner"></div>
+      <div id="playerLoadingText">Preparing stream...</div>
+    </div>
+  </div>
+  <div class="player-status" id="playerStatus">
+    <span id="statusText">Initializing...</span>
+    <button class="retry-btn" id="retryBtn" onclick="tryNextStream()" style="display:none">Skip &rarr;</button>
+  </div>
+  <div class="stream-selector" id="streamSelector"></div>
+</div>
+
+<script>
+let currentStreams = [];
+let currentStreamIndex = 0;
+let hlsInstance = null;
+
+async function loadMatches() {
+  const el = document.getElementById('loading');
+  const content = document.getElementById('content');
+  try {
+    const res = await fetch('/api/matches');
+    const data = await res.json();
+    el.style.display = 'none';
+    content.style.display = 'block';
+    if (data.error) { content.innerHTML = `<div class="error">${data.error}</div>`; return; }
+
+    let html = '';
+    for (const cat of data.categories) {
+      html += `<div class="category">
+        <h2><span>${cat.category}</span><span class="count">${cat.matches.length}</span></h2>
+        <div class="match-grid">`;
+      for (const m of cat.matches) {
+        const isLive = /started/i.test(m.status);
+        const isUpcoming = m.status.includes('from now');
+        const sc = isLive ? 'status-live' : (isUpcoming ? 'status-upcoming' : 'status-ended');
+        const tl = isLive ? 'LIVE' : (isUpcoming ? 'Upcoming' : 'Ended');
+        html += `<div class="match-card" onclick="playMatch('${m.url.replace(/'/g, "\\'")}', '${(m.team1 + ' vs ' + m.team2).replace(/'/g, "\\'")}')">
+          <div class="teams">${m.team1} vs ${m.team2}</div>
+          <div class="status ${sc}">${m.status}</div>
+          <div class="type-badge" style="font-size:0.7rem;color:#666;background:#1a1a2e;padding:2px 8px;border-radius:8px;width:fit-content;margin-top:4px">${tl}</div>
+        </div>`;
+      }
+      html += `</div></div>`;
+    }
+    content.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = `<div class="error">Failed to load matches: ${err.message}</div>`;
+  }
+}
+
+async function playMatch(gameUrl, title) {
+  const overlay = document.getElementById('playerOverlay');
+  document.getElementById('playerTitle').textContent = title || 'Match';
+  document.getElementById('streamSelector').innerHTML = '';
+  setStatus('Loading streams...');
+  overlay.classList.add('open');
+
+  try {
+    const res = await fetch(`/api/streams?url=${encodeURIComponent(gameUrl)}`);
+    const data = await res.json();
+    if (data.error || !data.streams || data.streams.length === 0) {
+      setStatus('No streams available for this match.');
+      return;
+    }
+
+    currentStreams = data.streams;
+    currentStreamIndex = 0;
+    renderStreamSelector();
+    tryStream(0);
+  } catch (err) {
+    setStatus('Error loading streams: ' + err.message);
+  }
+}
+
+function renderStreamSelector() {
+  const sel = document.getElementById('streamSelector');
+  sel.innerHTML = '';
+  currentStreams.forEach((s, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'stream-option' + (i === currentStreamIndex ? ' active' : '');
+    btn.textContent = s.provider;
+    btn.onclick = () => { currentStreamIndex = i; tryStream(i); };
+    btn.dataset.index = i;
+    sel.appendChild(btn);
+  });
+}
+
+function updateStreamSelector() {
+  document.querySelectorAll('.stream-option').forEach((btn, i) => {
+    btn.className = 'stream-option' + (i === currentStreamIndex ? ' active' : '') + (i < currentStreamIndex ? ' failed' : '');
+  });
+}
+
+async function tryStream(index) {
+  destroyPlayer();
+  currentStreamIndex = index;
+  updateStreamSelector();
+  const stream = currentStreams[index];
+  if (!stream) { setStatus('All streams exhausted. None are working.'); return; }
+
+  document.getElementById('playerStreamInfo').textContent = `${stream.provider} - ${stream.channel} (${stream.quality})`;
+  document.getElementById('retryBtn').style.display = 'none';
+  setStatus('Resolving stream source...', true);
+
+  try {
+    const resolveRes = await fetch(`/api/resolve?url=${encodeURIComponent(stream.url)}`);
+    const resolveData = await resolveRes.json();
+
+    if (resolveData.sources && resolveData.sources.length > 0) {
+      for (const source of resolveData.sources) {
+        const played = await tryPlaySource(source, stream);
+        if (played) return;
+      }
+      setStatus(`No playable source found for "${stream.provider}".`);
+    } else if (resolveData.iframes && resolveData.iframes.length > 0) {
+      // Fallback: embed the first iframe directly
+      const ok = await embedIframe(resolveData.iframes[0]);
+      if (ok) return;
+      setStatus(`Failed to embed stream.`);
+    } else {
+      // Last resort: embed the stream URL itself
+      const ok = await embedIframe(stream.url);
+      if (ok) return;
+      setStatus(`Could not play "${stream.provider}".`);
+    }
+  } catch (err) {
+    setStatus(`Error resolving stream: ${err.message}`);
+  }
+
+  document.getElementById('retryBtn').style.display = 'inline-block';
+}
+
+async function tryPlaySource(source, stream) {
+  setStatus(`Trying ${source.type} source...`, true);
+
+  if (source.type === 'youtube') {
+    return embedYouTube(source.url);
+  }
+  if (source.type === 'twitch') {
+    return embedIframe(source.url);
+  }
+  if (source.type === 'hls') {
+    const ref = source.referer || stream.url;
+    const proxyUrl = `/api/hls/playlist?url=${encodeURIComponent(source.url)}&ref=${encodeURIComponent(ref)}`;
+    return playHls(proxyUrl);
+  }
+  if (source.type === 'mp4' || source.type === 'video') {
+    return playVideo(source.url);
+  }
+  if (source.type === 'iframe') {
+    return embedIframe(source.url);
+  }
+  return false;
+}
+
+function embedYouTube(url) {
+  return new Promise((resolve) => {
+    const iframe = document.getElementById('iframePlayer');
+    const video = document.getElementById('videoPlayer');
+    video.style.display = 'none';
+    hideLoading();
+    iframe.style.display = 'block';
+    iframe.src = url;
+    setStatus('YouTube stream loaded. If nothing plays, try next stream.');
+    document.getElementById('retryBtn').style.display = 'inline-block';
+    document.getElementById('retryBtn').textContent = 'Skip \u2192';
+    // YouTube starts automatically so we assume success
+    resolve(true);
+  });
+}
+
+function playHls(url) {
+  return new Promise((resolve) => {
+    const video = document.getElementById('videoPlayer');
+    const iframe = document.getElementById('iframePlayer');
+    iframe.style.display = 'none';
+    video.style.display = 'block';
+
+    if (Hls.isSupported()) {
+      if (hlsInstance) hlsInstance.destroy();
+      hlsInstance = new Hls();
+      hlsInstance.loadSource(url);
+      hlsInstance.attachMedia(video);
+      hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+        hideLoading();
+        video.play().catch(() => {});
+        setStatus('HLS stream playing');
+        document.getElementById('retryBtn').style.display = 'none';
+      });
+      hlsInstance.on(Hls.Events.ERROR, (e, data) => {
+        if (data.fatal) {
+          setStatus('HLS error: ' + data.type);
+          resolve(false);
+        }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = url;
+      video.addEventListener('loadedmetadata', () => {
+        hideLoading();
+        video.play().catch(() => {});
+        setStatus('HLS stream playing (native)');
+      });
+      video.addEventListener('error', () => resolve(false));
+    } else {
+      setStatus('HLS not supported in this browser');
+      resolve(false);
+    }
+  });
+}
+
+function playVideo(url) {
+  return new Promise((resolve) => {
+    const video = document.getElementById('videoPlayer');
+    const iframe = document.getElementById('iframePlayer');
+    iframe.style.display = 'none';
+    video.style.display = 'block';
+    video.src = url;
+    video.addEventListener('loadedmetadata', () => {
+      hideLoading();
+      video.play().catch(() => {});
+      setStatus('Video playing');
+      document.getElementById('retryBtn').style.display = 'none';
+      resolve(true);
+    }, { once: true });
+    video.addEventListener('error', () => {
+      resolve(false);
+    }, { once: true });
+    setTimeout(() => {
+      if (video.readyState === 0) resolve(false);
+    }, 8000);
+  });
+}
+
+function embedIframe(url) {
+  return new Promise((resolve) => {
+    const iframe = document.getElementById('iframePlayer');
+    const video = document.getElementById('videoPlayer');
+    video.style.display = 'none';
+    iframe.style.display = 'block';
+    hideLoading();
+    iframe.src = url;
+    setStatus('Embedded stream. If nothing plays, try next.');
+    document.getElementById('retryBtn').style.display = 'inline-block';
+    document.getElementById('retryBtn').textContent = 'Skip \u2192';
+    setTimeout(() => resolve(true), 1000);
+  });
+}
+
+function tryNextStream() {
+  document.getElementById('retryBtn').style.display = 'none';
+  tryStream(currentStreamIndex + 1);
+}
+
+function destroyPlayer() {
+  if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+  document.getElementById('videoPlayer').src = '';
+  document.getElementById('videoPlayer').style.display = 'none';
+  document.getElementById('iframePlayer').src = '';
+  document.getElementById('iframePlayer').style.display = 'none';
+}
+
+function setStatus(text, loading) {
+  document.getElementById('statusText').textContent = text;
+  const loadEl = document.getElementById('playerLoading');
+  loadEl.style.display = loading ? 'flex' : 'none';
+}
+
+function hideLoading() {
+  document.getElementById('playerLoading').style.display = 'none';
+}
+
+function closePlayer() {
+  destroyPlayer();
+  document.getElementById('playerOverlay').classList.remove('open');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closePlayer();
+});
+
+loadMatches();
+</script>
+</body>
+</html>
