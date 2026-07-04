@@ -267,34 +267,19 @@ async function tryStream(index) {
         const played = await tryPlaySource(source, stream);
         if (played) return;
       }
-      setStatus(`No playable source found for "${stream.provider}".`);
-    } else if (resolveData.iframes && resolveData.iframes.length > 0) {
-      // Fallback: embed the first iframe directly
-      const ok = await embedIframe(resolveData.iframes[0]);
-      if (ok) return;
-      setStatus(`Failed to embed stream.`);
-    } else {
-      // Last resort: embed the stream URL itself
-      const ok = await embedIframe(stream.url);
-      if (ok) return;
-      setStatus(`Could not play "${stream.provider}".`);
     }
+    setStatus(`No working stream found for "${stream.provider}". Try next.`);
   } catch (err) {
     setStatus(`Error resolving stream: ${err.message}`);
   }
 
   document.getElementById('retryBtn').style.display = 'inline-block';
+  document.getElementById('retryBtn').textContent = 'Skip \u2192';
 }
 
 async function tryPlaySource(source, stream) {
   setStatus(`Trying ${source.type} source...`, true);
 
-  if (source.type === 'youtube') {
-    return embedYouTube(source.url);
-  }
-  if (source.type === 'twitch') {
-    return embedIframe(source.url);
-  }
   if (source.type === 'hls') {
     const ref = source.referer || stream.url;
     const proxyUrl = `/api/hls/playlist?url=${encodeURIComponent(source.url)}&ref=${encodeURIComponent(ref)}`;
@@ -302,9 +287,6 @@ async function tryPlaySource(source, stream) {
   }
   if (source.type === 'mp4' || source.type === 'video') {
     return playVideo(source.url);
-  }
-  if (source.type === 'iframe') {
-    return embedIframe(source.url);
   }
   return false;
 }

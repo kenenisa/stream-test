@@ -176,6 +176,41 @@ function tryMetaRefresh(text, pageUrl, results) {
   }
 }
 
+function tryAtobCalls(text, results) {
+  // Look for atob("...") calls that might decode to a URL
+  const atobPat = /(?:atob|btoa)\s*\(\s*["']([A-Za-z0-9+/]{20,}={0,2})["']\s*\)/g;
+  let m;
+  while ((m = atobPat.exec(text)) !== null) {
+    try {
+      const decoded = Buffer.from(m[1], 'base64').toString('utf-8');
+      if (decoded.includes('.m3u8')) {
+        const urls = decoded.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/g);
+        if (urls) {
+          for (const url of urls) {
+            if (!results.sources.find(s => s.url === url))
+              results.sources.push({ type: 'hls', url, quality: 'HD' });
+          }
+        }
+      }
+    } catch {}
+  }
+}
+
+function tryConcatUrls(text, results) {
+  // Look for URLs built by concatenation: "https://" + "domain.com/" + "path/file.m3u8"
+  const concatPat = /["']([^"']+)["']\s*\+\s*["']([^"']+)["'](?:\s*\+\s*["']([^"']+)["'])?(?:\s*\+\s*["']([^"']+)["'])?/g;
+  let m;
+  while ((m = concatPat.exec(text)) !== null) {
+    try {
+      const parts = m.slice(1).filter(Boolean);
+      const combined = parts.join('');
+      if (combined.includes('.m3u8') && combined.startsWith('http') && !results.sources.find(s => s.url === combined)) {
+        results.sources.push({ type: 'hls', url: combined, quality: 'HD' });
+      }
+    } catch {}
+  }
+}
+
 async function scrapeVideoSource(pageUrl, depth = 0) {
   const results = { sources: [], error: null };
   if (depth > 4) return results;
@@ -198,6 +233,8 @@ async function scrapeVideoSource(pageUrl, depth = 0) {
     await tryDecodeHexWorker(text, pageUrl, results);
     await tryCloudflareWorkerDirect(text, pageUrl, results);
     tryBase64Encoded(text, results);
+    tryAtobCalls(text, results);
+    tryConcatUrls(text, results);
     tryScriptVars(text, results);
     tryJsonConfigs($, results);
     tryDataAttrs($, results);
