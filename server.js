@@ -131,6 +131,9 @@ async function scrapeVideoSource(pageUrl, depth = 0) {
     results.error = err.message;
   }
 
+  // Remove YouTube — not useful
+  results.sources = results.sources.filter(s => s.type !== 'youtube');
+
   const seen = new Set();
   results.sources = results.sources.filter(s => {
     const key = s.url;
@@ -139,9 +142,9 @@ async function scrapeVideoSource(pageUrl, depth = 0) {
     return true;
   });
 
-  // Sort: HLS first, then YouTube/Twitch, then other
+  // Sort: HLS first, then others
   results.sources.sort((a, b) => {
-    const priority = { hls: 0, mp4: 1, video: 1, youtube: 2, twitch: 2, iframe: 3 };
+    const priority = { hls: 0, mp4: 1, video: 1, twitch: 2, iframe: 3 };
     return (priority[a.type] ?? 4) - (priority[b.type] ?? 4);
   });
 
